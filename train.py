@@ -5,12 +5,8 @@ This script trains one PR-BTD-DULRTC model for one mask setting.
 Default N_iter is fixed to 10. It is no longer designed for N_iter ablation.
 
 Loss:
-    train loss = L1(D_hat, D) + mu_grad * gradient_L1(D_hat, D)
-    val   loss = L1(D_hat, D)          # kept pure-L1 so best.pt stays comparable
-
-The gradient term penalizes the difference between predicted and ground-truth
-spatial gradients, forcing the model to recover sharp shadow edges behind
-buildings (pure L1 alone has no constraint on edge sharpness and over-smooths).
+    train loss = L1(D_hat, D)
+    val   loss = L1(D_hat, D)
 
 Example output dirs:
     runs/mask1/
@@ -40,7 +36,6 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --epochs 50 \
     --batch-size 1 \
     --lr 1e-3 \
-    --mu-grad 0 \
     --save-root runs
 """
 
@@ -55,7 +50,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from model import PR_BTD_DULRTC
+from model import DUSPF_RME
 from util import DULRTCTripleDataset, SyntheticBTDDataset
 
 
@@ -115,19 +110,6 @@ def get_args():
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--num-workers", type=int, default=2)
 
-    # ---------------- loss ----------------
-    p.add_argument(
-        "--mu-grad",
-        type=float,
-        default=0.15,
-        help=(
-            "Weight of the gradient (edge-sharpness) loss. "
-            "Set 0.0 to recover the original pure-L1 training. "
-            "Start at 0.1; raise to 0.3/0.5 if shadow edges stay blurry, "
-            "lower if ringing/overshoot artifacts appear near edges."
-        ),
-    )
-
     # ---------------- save ----------------
     p.add_argument(
         "--save-root",
@@ -156,26 +138,6 @@ def get_args():
     p.add_argument("--cpu", action="store_true")
 
     return p.parse_args()
-
-
-# ---------------------------------------------------------------------------
-def gradient_l1(D_hat: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
-    """
-    Edge-sharpness loss: L1 difference between the spatial gradients of the
-    prediction and the ground truth.
-
-    Pure pixel-wise L1 has no constraint on relationships between neighbouring
-    pixels, so it does not penalize blurred shadow edges. This term compares
-    horizontal and vertical finite differences, forcing predicted edges
-    (e.g. building-cast shadow boundaries) to match the ground truth.
-
-    D_hat, D : [N, K, H, W]
-    """
-    dx_hat = D_hat[:, :, :, 1:] - D_hat[:, :, :, :-1]
-    dy_hat = D_hat[:, :, 1:, :] - D_hat[:, :, :-1, :]
-    dx_gt = D[:, :, :, 1:] - D[:, :, :, :-1]
-    dy_gt = D[:, :, 1:, :] - D[:, :, :-1, :]
-    return (dx_hat - dx_gt).abs().mean() + (dy_hat - dy_gt).abs().mean()
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +263,6 @@ def train_one_run(args, train_loader, val_loader, device):
     print(f"[run] Start training")
     print(f"[run] mask: {args.mask_type}{args.omega_num}")
     print(f"[run] N_iter: {args.N_iter}")
-    print(f"[run] mu_grad: {args.mu_grad}")
     print(f"[run] save_dir: {save_dir}")
     print("=" * 80)
 
@@ -309,7 +270,7 @@ def train_one_run(args, train_loader, val_loader, device):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    model = PR_BTD_DULRTC(
+    model = DUSPF_RME(
         R=args.R,
         K=args.K,
         N_iter=args.N_iter,
@@ -346,9 +307,7 @@ def train_one_run(args, train_loader, val_loader, device):
         model.train()
 
         t0 = time.time()
-        sum_loss = 0.0       # total (L1 + grad) for logging
-        sum_l1 = 0.0         # L1 part only, for logging
-        sum_grad = 0.0       # grad part only, for logging
+        sum_loss = 0.0
         n_seen = 0
         n_skip = 0
 
@@ -365,13 +324,7 @@ def train_one_run(args, train_loader, val_loader, device):
             try:
                 D_hat, X, E, S, c = model(D_obs, Om, B, Tx)
 
-                l1_term = loss_fn(D_hat, D)
-                if args.mu_grad > 0.0:
-                    grad_term = gradient_l1(D_hat, D)
-                    loss = l1_term + args.mu_grad * grad_term
-                else:
-                    grad_term = torch.zeros((), device=D.device)
-                    loss = l1_term
+                loss = loss_fn(D_hat, D)
 
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
@@ -445,16 +398,12 @@ def train_one_run(args, train_loader, val_loader, device):
 
             bs = D.shape[0]
             sum_loss += loss.item() * bs
-            sum_l1 += l1_term.item() * bs
-            sum_grad += float(grad_term) * bs
             n_seen += bs
 
-            del D_obs, D_hat, X, E, S, c, loss, l1_term, grad_term
+            del D_obs, D_hat, X, E, S, c, loss
             clear_cuda_cache()
 
-        train_total = sum_loss / max(1, n_seen)
-        train_l1 = sum_l1 / max(1, n_seen)
-        train_grad = sum_grad / max(1, n_seen)
+        train_l1 = sum_loss / max(1, n_seen)
 
         # ------------------------------------------------- validation
         # Validation uses pure L1 only, so best.pt selection stays comparable
@@ -501,9 +450,7 @@ def train_one_run(args, train_loader, val_loader, device):
         line = (
             f"[epoch {epoch + 1:3d}/{args.epochs:3d}] "
             f"N_iter {args.N_iter:2d}   "
-            f"train total {train_total:.4f}   "
             f"train L1 {train_l1:.4f}   "
-            f"train grad {train_grad:.4f}   "
             f"val L1 {val_l1:.4f}   "
             f"lr {opt.param_groups[0]['lr']:.2e}   "
             f"train skips {n_skip}   "
@@ -550,7 +497,6 @@ def train_one_run(args, train_loader, val_loader, device):
         "save_dir": str(save_dir),
         "mask_type": args.mask_type,
         "omega_num": args.omega_num,
-        "mu_grad": args.mu_grad,
     }
 
     with open(save_dir / "summary.json", "w") as f:
@@ -584,7 +530,6 @@ def main():
         print(f"[setup] cuda name: {torch.cuda.get_device_name(torch.cuda.current_device())}")
 
     print(f"[setup] fixed N_iter: {args.N_iter}")
-    print(f"[setup] mu_grad: {args.mu_grad}")
     print(f"[setup] save_root: {args.save_root}")
 
     train_loader, val_loader = build_loaders(args, device)

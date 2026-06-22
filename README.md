@@ -1,12 +1,33 @@
-# 改动
-把CNN改成UNet网络，避开CNN局限的感受野，使用UNet扩充至全局视野
-目前在fiber1条件下效果超越RadioUNet，并且fiber整体除了fiber10都有提升
-但问题是mask所有比CNN效果差，从可视化图来看是UNet把采样点做成了噪点
-目前UNet + mu_grad=0.15效果不好，现在尝试去掉mu_grad=0.15，改成mu_grad=0，只用L1损失
+# DUSPF-RME
 
-跑完 mu_grad=0.0 后：
-    如果可视化图里噪点没了 → 梯度损失就是元凶，论文用 mu_grad=0.0 重跑
-    如果可视化图里噪点还在，只是淡了一些 → U-Net 本身也是问题，需要更深入调整
-    如果可视化图里噪点还是很明显 → 必须回退到 CNN
+**DUSPF-RME** is a **D**eep **U**nrolled network with **S**LF-**P**SD **F**actorization for **R**adio **M**ap **E**stimation. It is designed for multi-band radio map completion from sparse measurements by integrating physics-informed propagation priors, SLF-PSD factorization, and ADMM-based deep unrolling.
 
-HINT - 目前是try3版本 2026.06.20 21h53m
+## Overview
+
+DUSPF-RME formulates multi-band radio map estimation as an SLF-PSD-constrained tensor completion problem. Instead of relying on generic tensor nuclear-norm minimization, the proposed method represents the radio map tensor using an emitter-aware low-rank structure. Specifically, each transmitter is modeled by a spatial loss field (SLF) and a power spectral density (PSD) vector, enabling efficient multi-frequency radio map recovery under highly sparse measurements.
+
+The optimization problem is unrolled into a deep network based on ADMM iterations. This combines the interpretability of model-driven optimization with the representation power of deep neural networks.
+
+## Key Features
+
+### SLF-PSD Factorization
+
+DUSPF-RME decomposes the multi-band radio map into a rank-(R) outer-product representation between per-emitter SLFs and PSD vectors. This structure captures frequency-domain low-rank correlations while avoiding singular value thresholding operations required by Tucker nuclear-norm minimization.
+
+### Joint PSD Initialization
+
+The PSD coefficients are initialized using a Tikhonov-regularized joint least-squares procedure. This initialization exploits inter-emitter coupling on the observed support and provides a stable starting point for subsequent ADMM iterations.
+
+### Physics-Informed Propagation Prior
+
+For each transmitter, DUSPF-RME constructs a learnable physics-informed propagation prior by combining free-space path loss with ray-cast geometric shadowing. The path-loss exponent and shadowing attenuation coefficient are optimized end-to-end with the network. Since the prior depends only on the building map and transmitter locations, it remains informative even when the available measurements are extremely sparse.
+
+### Physics-Aware U-Net Proximal Operator
+
+The SLF proximal mapping is implemented using a learned U-Net module. The U-Net refines the SLF estimate by predicting a residual correction on top of the propagation prior. It is conditioned on physically meaningful per-emitter features, including the distance map, ray-cast shadowing field, building map, and propagation prior.
+
+Compared with shallow local convolutional modules, the U-Net provides a larger effective receptive field, which helps propagate sparse observations across the spatial grid under extremely low sampling rates.
+
+## Experimental Results
+
+Experiments on the BART-Lab Radiomap dataset show that DUSPF-RME consistently outperforms existing methods across fiber sampling rates from 1% to 15%. Compared with RadioUNet, DUSPF-RME achieves improved PSNR and outage detection accuracy, demonstrating its effectiveness in sparse multi-band radio map estimation.

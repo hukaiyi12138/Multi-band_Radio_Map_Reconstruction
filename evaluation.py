@@ -1,28 +1,22 @@
 """
-evaluation.py - Summarise all test results into one table.
+evaluation.py - Summarise test results and optionally aggregate over seeds.
 
-Place this file under:
-    /data/home/hky/DULRTC/hky_try_3/evaluation.py
+Typical usage:
 
-It searches for:
-    metrics_01.txt
-    metrics_01.json
+Single seed:
+    python evaluation.py --root test_seed0 --out eval/evaluation_seed0
 
-Typical test output:
-    runs/mask15_safe_bs1/test/Mask15/metrics_01.txt
-    runs/mask10_xxx/test/Mask10/metrics_01.txt
-    runs/fiber15_xxx/test/Fiber15/metrics_01.txt
-
-Usage:
-    cd /data/home/hky/DULRTC/hky_try_3
-
-    python evaluation.py --root test
+Multiple seeds:
+    python evaluation.py \
+        --roots test_seed0 test_seed42 test_seed2024 \
+        --out eval/evaluation_summary
 
 Outputs:
-    eval/
-        evaluation_summary.txt
-        evaluation_summary.csv
-        evaluation_summary.md
+    eval/evaluation_summary.txt
+    eval/evaluation_summary.csv
+    eval/evaluation_summary.md
+
+If multiple roots are given, the script reports mean ± std over seeds.
 """
 
 from __future__ import annotations
@@ -34,29 +28,43 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 
 METRIC_NAMES = ["PSNR", "RMSE", "NMSE", "outage_mse", "outage_rmse"]
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--root",
         type=str,
-        default="runs",
-        help="Root directory to recursively search for metrics_01.txt/json.",
+        default=None,
+        help="Single root directory to recursively search for metrics_01.txt/json.",
     )
+
+    parser.add_argument(
+        "--roots",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Multiple root directories, e.g., test_seed0 test_seed42 test_seed2024.",
+    )
+
     parser.add_argument(
         "--out",
         type=str,
         default="eval/evaluation_summary",
         help="Output prefix. Generates .txt, .csv and .md.",
     )
+
     parser.add_argument(
         "--prefer-json",
         action="store_true",
         help="Prefer metrics_01.json over metrics_01.txt when both exist.",
     )
+
     return parser.parse_args()
 
 
@@ -78,8 +86,7 @@ def display_exp_name(name: str) -> str:
     return name
 
 
-def exp_sort_key(row: Dict[str, str]):
-    exp = row["Experiment"]
+def exp_sort_key_from_name(exp: str):
     kind, num = normalise_exp_name(exp)
 
     if kind == "Mask":
@@ -89,7 +96,11 @@ def exp_sort_key(row: Dict[str, str]):
     else:
         kind_order = 9
 
-    return (kind_order, -num, exp)
+    return kind_order, -num, exp
+
+
+def exp_sort_key(row: Dict[str, str]):
+    return exp_sort_key_from_name(row["Experiment"])
 
 
 def parse_metrics_txt(path: Path) -> Optional[Dict[str, float]]:
@@ -109,7 +120,6 @@ def parse_metrics_txt(path: Path) -> Optional[Dict[str, float]]:
 
     parts = avg_line.split()
 
-    # [average] PSNR RMSE NMSE outage_mse outage_rmse
     if len(parts) < 6:
         return None
 
@@ -134,7 +144,6 @@ def parse_metrics_json(path: Path) -> Optional[Dict[str, float]]:
     except Exception:
         return None
 
-    # Current metrics_01.json style
     if "average" in data and isinstance(data["average"], dict):
         avg = data["average"]
         out = {}
@@ -143,7 +152,6 @@ def parse_metrics_json(path: Path) -> Optional[Dict[str, float]]:
                 out[k] = float(avg[k])
         return out if out else None
 
-    # Compatibility with older metrics.json style
     key_map = {
         "PSNR": "PSNR_dB",
         "RMSE": "RMSE",
@@ -193,7 +201,11 @@ def discover_metric_files(root: Path, prefer_json: bool = False) -> List[Path]:
     return sorted(selected)
 
 
-def collect_results(root: Path, prefer_json: bool = False) -> List[Dict[str, str]]:
+def collect_results_one_root(
+    root: Path,
+    prefer_json: bool = False,
+    seed_name: str = "",
+) -> List[Dict[str, str]]:
     metric_files = discover_metric_files(root, prefer_json=prefer_json)
 
     rows: List[Dict[str, str]] = []
@@ -212,6 +224,7 @@ def collect_results(root: Path, prefer_json: bool = False) -> List[Dict[str, str
         exp = display_exp_name(exp_raw)
 
         row = {
+            "Seed": seed_name,
             "Experiment": exp,
             "Source": str(path),
         }
@@ -228,8 +241,61 @@ def collect_results(root: Path, prefer_json: bool = False) -> List[Dict[str, str
     return rows
 
 
-def make_text_table(rows: List[Dict[str, str]]) -> str:
-    headers = ["Experiment"] + METRIC_NAMES
+def infer_seed_name(root: Path) -> str:
+    name = root.name
+    m = re.search(r"seed(\d+)", name, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return name
+
+
+def aggregate_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    grouped: Dict[str, List[Dict[str, str]]] = {}
+
+    for row in rows:
+        grouped.setdefault(row["Experiment"], []).append(row)
+
+    agg_rows: List[Dict[str, str]] = []
+
+    for exp, exp_rows in grouped.items():
+        out = {
+            "Experiment": exp,
+            "N": str(len(exp_rows)),
+        }
+
+        for metric in METRIC_NAMES:
+            vals = []
+            for row in exp_rows:
+                if row.get(metric, "") != "":
+                    vals.append(float(row[metric]))
+
+            if not vals:
+                out[metric] = ""
+                out[f"{metric}_mean"] = ""
+                out[f"{metric}_std"] = ""
+                continue
+
+            arr = np.asarray(vals, dtype=float)
+            mean = arr.mean()
+            std = arr.std(ddof=1) if len(arr) >= 2 else 0.0
+
+            out[metric] = f"{mean:.4f} ± {std:.4f}"
+            out[f"{metric}_mean"] = f"{mean:.4f}"
+            out[f"{metric}_std"] = f"{std:.4f}"
+
+        agg_rows.append(out)
+
+    agg_rows.sort(key=exp_sort_key)
+    return agg_rows
+
+
+def make_text_table(rows: List[Dict[str, str]], aggregate: bool = False) -> str:
+    headers = ["Experiment"]
+
+    if aggregate:
+        headers += ["N"] + METRIC_NAMES
+    else:
+        headers += ["Seed"] + METRIC_NAMES
 
     if not rows:
         return "No metrics found.\n"
@@ -255,8 +321,13 @@ def make_text_table(rows: List[Dict[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def make_markdown_table(rows: List[Dict[str, str]]) -> str:
-    headers = ["Experiment"] + METRIC_NAMES
+def make_markdown_table(rows: List[Dict[str, str]], aggregate: bool = False) -> str:
+    headers = ["Experiment"]
+
+    if aggregate:
+        headers += ["N"] + METRIC_NAMES
+    else:
+        headers += ["Seed"] + METRIC_NAMES
 
     lines = []
     lines.append("| " + " | ".join(headers) + " |")
@@ -269,8 +340,13 @@ def make_markdown_table(rows: List[Dict[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def save_csv(rows: List[Dict[str, str]], out_path: Path):
-    headers = ["Experiment"] + METRIC_NAMES + ["Source"]
+def save_csv(rows: List[Dict[str, str]], out_path: Path, aggregate: bool = False):
+    if aggregate:
+        headers = ["Experiment", "N"]
+        for metric in METRIC_NAMES:
+            headers += [metric, f"{metric}_mean", f"{metric}_std"]
+    else:
+        headers = ["Seed", "Experiment"] + METRIC_NAMES + ["Source"]
 
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
@@ -282,26 +358,49 @@ def save_csv(rows: List[Dict[str, str]], out_path: Path):
 def main():
     args = parse_args()
 
-    root = Path(args.root)
-    if not root.exists():
-        raise FileNotFoundError(f"Root directory not found: {root}")
+    if args.roots is not None:
+        root_paths = [Path(x) for x in args.roots]
+        aggregate = True
+    elif args.root is not None:
+        root_paths = [Path(args.root)]
+        aggregate = False
+    else:
+        raise ValueError("Please provide either --root or --roots.")
 
-    rows = collect_results(root, prefer_json=args.prefer_json)
+    all_rows: List[Dict[str, str]] = []
+
+    for root in root_paths:
+        if not root.exists():
+            print(f"[warn] root directory not found, skipped: {root}")
+            continue
+
+        seed_name = infer_seed_name(root)
+        rows = collect_results_one_root(
+            root,
+            prefer_json=args.prefer_json,
+            seed_name=seed_name,
+        )
+        all_rows.extend(rows)
+
+    if aggregate:
+        rows_to_save = aggregate_rows(all_rows)
+    else:
+        rows_to_save = all_rows
 
     out_prefix = Path(args.out)
 
     txt_path = out_prefix.with_suffix(".txt")
     csv_path = out_prefix.with_suffix(".csv")
     md_path = out_prefix.with_suffix(".md")
-    
+
     txt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    txt = make_text_table(rows)
-    md = make_markdown_table(rows)
+    txt = make_text_table(rows_to_save, aggregate=aggregate)
+    md = make_markdown_table(rows_to_save, aggregate=aggregate)
 
     txt_path.write_text(txt, encoding="utf-8")
     md_path.write_text(md, encoding="utf-8")
-    save_csv(rows, csv_path)
+    save_csv(rows_to_save, csv_path, aggregate=aggregate)
 
     print("\n=== Evaluation Summary ===")
     print(txt)
@@ -310,11 +409,11 @@ def main():
     print(f"Saved CSV: {csv_path}")
     print(f"Saved MD : {md_path}")
 
-    if not rows:
+    if not rows_to_save:
         print("[warn] No valid metrics_01.txt/json files found.")
         print("[hint] Expected files like:")
-        print("       runs/.../test/Mask15/metrics_01.txt")
-        print("       runs/.../test/Fiber15/metrics_01.txt")
+        print("       test_seed0/Mask15/metrics_01.txt")
+        print("       test_seed42/Fiber15/metrics_01.txt")
 
 
 if __name__ == "__main__":

@@ -569,7 +569,7 @@ class BTD_RPCA_Block(nn.Module):
 # Full network
 # ---------------------------------------------------------------------------
 
-class PR_BTD_DULRTC(nn.Module):
+class DUSPF_RME(nn.Module):
     """
     Stack of N_iter BTD-ADMM unrolling blocks.
 
@@ -638,14 +638,82 @@ class PR_BTD_DULRTC(nn.Module):
 
     @staticmethod
     def _init_psd(S: torch.Tensor,
-                  D_obs: torch.Tensor,
-                  Omega: torch.Tensor) -> torch.Tensor:
-        S_e = S.unsqueeze(2)
-        D_e = D_obs.unsqueeze(1)
-        O_e = Omega.unsqueeze(1)
-        num = (S_e * D_e * O_e).sum(dim=(-1, -2))
-        den = (S_e ** 2 * O_e).sum(dim=(-1, -2)) + 1e-6
-        return torch.clamp(num / den, min=0.0)
+                D_obs: torch.Tensor,
+                Omega: torch.Tensor) -> torch.Tensor:
+        """
+        Density-adaptive Tikhonov-regularized least-squares initialization for
+        the PSD coefficients c_{r,k}.
+
+        For each frequency band k, we solve the R-dimensional linear system:
+            (A_k + eps * I) @ c_k = b_k,
+            A_k[i, j] = sum_{Omega_k} S_i * S_j
+            b_k[i]    = sum_{Omega_k} S_i * D_k
+
+        The Tikhonov parameter eps adapts to the per-band observation density:
+            - sparse  (~1%):  eps small  (~1e-4) -> behaves like joint LS,
+                            exploiting inter-emitter coupling for identifiability.
+            - dense  (~15%):  eps large  (~1e-2) -> approaches independent LS,
+                            better conditioned when SLFs are nearly collinear.
+
+        The interpolation is linear in the per-band sparsity ratio
+        rho_k = |Omega_k| / (H*W).
+
+        Args:
+            S:     [N, R, H, W]   per-emitter SLF
+            D_obs: [N, K, H, W]   sparse observation
+            Omega: [N, K, H, W]   binary observation mask
+
+        Returns:
+            c:     [N, R, K]      non-negative PSD coefficients
+        """
+        N, R, H, W = S.shape
+        _, K, _, _ = D_obs.shape
+
+        S_flat = S.reshape(N, R, -1)            # [N, R, HW]
+        D_flat = D_obs.reshape(N, K, -1)        # [N, K, HW]
+        O_flat = Omega.reshape(N, K, -1)        # [N, K, HW]
+
+        # ---- adaptive Tikhonov regularization ----
+        eps_min = 1e-4
+        eps_max = 1e-2
+        rho_min = 0.01
+        rho_max = 0.15
+
+        HW = float(H * W)
+        rho_per_band = O_flat.sum(dim=-1) / HW  # [N, K]
+        alpha = ((rho_per_band - rho_min) / (rho_max - rho_min)).clamp(0.0, 1.0)
+        eps_reg = eps_min + (eps_max - eps_min) * alpha  # [N, K]
+
+        eye_R = torch.eye(R, device=S.device, dtype=S.dtype).unsqueeze(0)  # [1, R, R]
+
+        c_per_band = []
+        for k in range(K):
+            mask_k = O_flat[:, k, :].unsqueeze(1)    # [N, 1, HW]
+            Sm = S_flat * mask_k                      # [N, R, HW]
+            Dm = D_flat[:, k, :] * O_flat[:, k, :]    # [N, HW]
+
+            # A_k = Sm @ Sm.T,  shape [N, R, R]
+            A = torch.bmm(Sm, Sm.transpose(1, 2))
+            # b_k = Sm @ Dm,    shape [N, R]
+            b = torch.bmm(Sm, Dm.unsqueeze(-1)).squeeze(-1)
+
+            # Per-sample adaptive Tikhonov regularization (this band)
+            eps_k = eps_reg[:, k].view(N, 1, 1)        # [N, 1, 1]
+            A = A + eps_k * eye_R                       # broadcast to [N, R, R]
+
+            # Solve A c = b  ->  c shape [N, R]
+            try:
+                c_k = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)
+            except RuntimeError:
+                # Fallback: pseudoinverse when A is too ill-conditioned
+                c_k = torch.bmm(torch.linalg.pinv(A), b.unsqueeze(-1)).squeeze(-1)
+
+            c_per_band.append(c_k)
+
+        c = torch.stack(c_per_band, dim=-1)           # [N, R, K]
+        c = torch.clamp(c, min=0.0)
+
+        return c
 
     def forward(self,
                 D_obs:  torch.Tensor,
@@ -704,7 +772,7 @@ if __name__ == "__main__":
         for tag, (N, K, H, W, R) in [("BART-Lab-like", (2, 3, 64, 64, 3)),
                                       ("RadioMapSeer-like", (2, 1, 64, 64, 1))]:
             print(f"\n[{tag}]  N={N} K={K} H={H} W={W} R={R}")
-            model = PR_BTD_DULRTC(R=R, K=K, N_iter=4, prox_backbone=backbone)
+            model = DUSPF_RME(R=R, K=K, N_iter=4, prox_backbone=backbone)
             n_params = sum(p.numel() for p in model.parameters())
             print(f"  model parameters: {n_params:,}")
 

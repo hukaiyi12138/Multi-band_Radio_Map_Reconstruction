@@ -7,19 +7,16 @@ set -euo pipefail
 # Fixed N_iter = 10.
 #
 # One tmux window for each job:
-#   mask/fiber x omega_num=1,5,10,15
+#   seed x mask/fiber x omega_num=1,5,10,15
 #
-# Total jobs: 2 * 4 = 8
+# Total jobs: 3 * 2 * 4 = 24
 #
 # Output dirs:
-#   runs/mask1
-#   runs/mask5
-#   runs/mask10
-#   runs/mask15
-#   runs/fiber1
-#   runs/fiber5
-#   runs/fiber10
-#   runs/fiber15
+#   runs_seed0/mask1
+#   runs_seed0/mask5
+#   ...
+#   runs_seed42/fiber15
+#   ...
 # ============================================================
 
 # ---------------- user config ----------------
@@ -45,13 +42,14 @@ LR="1e-3"
 WEIGHT_DECAY="0.0"
 GRAD_CLIP="1.0"
 NUM_WORKERS=2
-SEED=0
-MU_GRAD="0"        # 梯度损失权重,0.0 = 退回纯 L1
 
-GPUS=(0 1 2 3 4 5)
+# Three random seeds
+SEEDS=(0 42 2024)
 
-MASK_TYPES=(mask fiber)
-OMEGA_NUMS=(1 5 10 15)
+GPUS=(1 2 3 4 5)
+
+MASK_TYPES=(fiber)
+OMEGA_NUMS=(15 10 5 1)
 
 EXTRA_ARGS=""
 
@@ -73,7 +71,6 @@ if [[ ! -f "${CONDA_SH}" ]]; then
 fi
 
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
-mkdir -p "${SAVE_ROOT}"
 
 # ---------------- create tmux session ----------------
 if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
@@ -86,25 +83,31 @@ fi
 
 job_id=0
 
-for mask_type in "${MASK_TYPES[@]}"; do
-    for omega_num in "${OMEGA_NUMS[@]}"; do
-        gpu_id="${GPUS[$((job_id % ${#GPUS[@]}))]}"
+for seed in "${SEEDS[@]}"; do
+    save_root_seed="${SAVE_ROOT}_seed${seed}"
+    mkdir -p "${save_root_seed}"
 
-        exp_name="${mask_type}${omega_num}"
-        save_dir="${SAVE_ROOT}/${exp_name}"
-        log_path="${save_dir}/tmux_train.log"
-        window_name="${exp_name}"
+    for mask_type in "${MASK_TYPES[@]}"; do
+        for omega_num in "${OMEGA_NUMS[@]}"; do
+            gpu_id="${GPUS[$((job_id % ${#GPUS[@]}))]}"
 
-        mkdir -p "${save_dir}"
+            exp_name="${mask_type}${omega_num}"
+            save_dir="${save_root_seed}/${exp_name}"
+            log_path="${save_dir}/tmux_train.log"
 
-        # 避免重复创建同名窗口
-        if tmux list-windows -t "${SESSION_NAME}" -F '#W' | grep -qx "${window_name}"; then
-            echo "[skip] window already exists: ${window_name}"
-            job_id=$((job_id + 1))
-            continue
-        fi
+            # Window name includes seed to avoid conflicts
+            window_name="${exp_name}_s${seed}"
 
-        cmd="source ${CONDA_SH} && \
+            mkdir -p "${save_dir}"
+
+            # Avoid duplicate tmux windows
+            if tmux list-windows -t "${SESSION_NAME}" -F '#W' | grep -qx "${window_name}"; then
+                echo "[skip] window already exists: ${window_name}"
+                job_id=$((job_id + 1))
+                continue
+            fi
+
+            cmd="source ${CONDA_SH} && \
 conda activate ${CONDA_ENV} && \
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 && \
 CUDA_VISIBLE_DEVICES=${gpu_id} python ${TRAIN_PY} \
@@ -124,19 +127,20 @@ CUDA_VISIBLE_DEVICES=${gpu_id} python ${TRAIN_PY} \
   --weight-decay ${WEIGHT_DECAY} \
   --grad-clip ${GRAD_CLIP} \
   --num-workers ${NUM_WORKERS} \
-  --seed ${SEED} \
-  --mu-grad ${MU_GRAD} \
-  --save-root ${SAVE_ROOT} \
+  --seed ${seed} \
+  --save-root ${save_root_seed} \
   ${EXTRA_ARGS} 2>&1 | tee ${log_path}"
 
-        tmux new-window -t "${SESSION_NAME}" -n "${window_name}"
-        tmux send-keys -t "${SESSION_NAME}:${window_name}" "cd $(pwd)" C-m
-        tmux send-keys -t "${SESSION_NAME}:${window_name}" "echo '[start] ${exp_name} on GPU ${gpu_id}, N_iter=${N_ITER}'" C-m
-        tmux send-keys -t "${SESSION_NAME}:${window_name}" "${cmd}" C-m
+            tmux new-window -t "${SESSION_NAME}" -n "${window_name}"
+            tmux send-keys -t "${SESSION_NAME}:${window_name}" "cd $(pwd)" C-m
+            tmux send-keys -t "${SESSION_NAME}:${window_name}" \
+                "echo '[start] ${exp_name}, seed=${seed}, GPU=${gpu_id}, N_iter=${N_ITER}'" C-m
+            tmux send-keys -t "${SESSION_NAME}:${window_name}" "${cmd}" C-m
 
-        echo "[launch] ${exp_name} -> tmux:${SESSION_NAME}:${window_name}, GPU=${gpu_id}, log=${log_path}"
+            echo "[launch] ${exp_name}, seed=${seed} -> tmux:${SESSION_NAME}:${window_name}, GPU=${gpu_id}, log=${log_path}"
 
-        job_id=$((job_id + 1))
+            job_id=$((job_id + 1))
+        done
     done
 done
 

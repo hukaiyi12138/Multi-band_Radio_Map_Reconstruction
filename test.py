@@ -30,7 +30,20 @@ CUDA_VISIBLE_DEVICES=0 python test.py \
     --K 3 \
     --N-iter 10 \
     --batch-size 1 \
-    --output-path /data/home/hky/DULRTC/hky_try_3/test \
+    --output-path /data/home/hky/DULRTC/DUSPF_RME/test \
+    --max-save-figures 10
+
+CUDA_VISIBLE_DEVICES=0 python test.py \
+    --checkpoint runs_eps_min_1e5/mask1/best.pt \
+    --dataset dulrtc_triple \
+    --root /data/home/hky/dataset/DULRTC_triple \
+    --omega-num 1 \
+    --mask-type mask \
+    --R 3 \
+    --K 3 \
+    --N-iter 10 \
+    --batch-size 1 \
+    --output-path /data/home/hky/DULRTC/DUSPF_RME/test_1e5 \
     --max-save-figures 10
 """
 
@@ -46,7 +59,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from model import PR_BTD_DULRTC
+from model import DUSPF_RME
 from util import DULRTCTripleDataset, SyntheticBTDDataset
 
 
@@ -229,7 +242,7 @@ def load_model(args, device):
         default=args.N_iter,
     )
 
-    model = PR_BTD_DULRTC(
+    model = DUSPF_RME(
         R=int(ck_args.get("R", args.R)),
         K=int(ck_args.get("K", args.K)),
         N_iter=int(n_iter),
@@ -268,15 +281,23 @@ def inference(model, D, Om, B, Tx):
 
 
 # ---------------------------------------------------------------------------
+# def cal_PSNR(X, X_hat):
+#     mse = np.mean((X - X_hat) ** 2)
+#     if mse == 0:
+#         return 100.0
+
+#     max_val = np.max(X_hat)
+#     if max_val <= 0:
+#         max_val = 1.0
+
+#     return 20.0 * np.log10(max_val / np.sqrt(mse))
+
+# 修改后
 def cal_PSNR(X, X_hat):
     mse = np.mean((X - X_hat) ** 2)
     if mse == 0:
         return 100.0
-
-    max_val = np.max(X_hat)
-    if max_val <= 0:
-        max_val = 1.0
-
+    max_val = 1.0   # 改成这行
     return 20.0 * np.log10(max_val / np.sqrt(mse))
 
 
