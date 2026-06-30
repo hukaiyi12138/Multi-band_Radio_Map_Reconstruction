@@ -1,0 +1,47 @@
+================================================================================
+DUSPF-RME Parameter Count and Inference Time
+================================================================================
+Device: cuda
+GPU: NVIDIA GeForce RTX 4090
+
+Model configuration:
+R = 3
+K = 3
+H = 256
+W = 256
+N_iter = 10
+prox_hidden = 48
+prox_layers = 3
+n_ray_samples = 32
+gn_groups = 8
+prox_init_std = 0.001
+skip_last_prox = True
+prox_backbone = unet
+
+Parameter count:
+Total parameters:         56427901 (56.4279 M)
+Trainable parameters:     56427901 (56.4279 M)
+Non-trainable parameters: 0 (0.0000 M)
+
+Inference time:
+Batch size: 1
+Warm-up runs: 10
+Measured runs: 100
+Average time: 81.1150 ms / sample
+
+Top-level module breakdown:
+
+Proximal module breakdown inside each block:
+--------------------------------------------------------------------------------
+Block           Submodule                   Trainable Params
+--------------------------------------------------------------------------------
+block_0         prox                                6.2698 M
+block_1         prox                                6.2698 M
+block_2         prox                                6.2698 M
+block_3         prox                                6.2698 M
+block_4         prox                                6.2698 M
+block_5         prox                                6.2698 M
+block_6         prox                                6.2698 M
+block_7         prox                                6.2698 M
+block_8         prox                                6.2698 M
+================================================================================
