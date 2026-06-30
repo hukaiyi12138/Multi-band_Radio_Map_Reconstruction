@@ -1,0 +1,37 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda / env
+.env
+.venv/
+venv/
+env/
+
+# Training / testing outputs
+runs_seed*/
+test_seed*/
+eval/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Logs and profiles
+*.log
+*.txt
+
+# Data / large scientific files
+*.mat
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.csv
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
